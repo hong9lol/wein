@@ -1,40 +1,42 @@
 package com.niew.bodychecker
 
 import android.Manifest
-import android.content.ContentValues
+import android.annotation.SuppressLint
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
-import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
-import android.provider.MediaStore
 import android.util.Log
-import android.widget.Toast
+import android.util.Size
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.widget.SeekBar
+import android.widget.SeekBar.*
+import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.*
+import androidx.camera.core.ImageCapture.OnImageCapturedCallback
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.Recorder
-import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.applyCanvas
+import com.niew.bodychecker.Image.imageProxy
 import com.niew.bodychecker.databinding.ActivityMainBinding
-import java.text.SimpleDateFormat
-import java.util.*
+import com.niew.bodychecker.utils.BackgroundHelper.MAX_SEEKBAR_VALUE
+import com.niew.bodychecker.utils.BackgroundHelper.createBackgroundLineCanvas
+import kotlinx.android.synthetic.main.activity_main.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-typealias LumaListener = (luma: Double) -> Unit
+typealias DrawListener = () -> Unit
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var viewBinding: ActivityMainBinding
-
+    private lateinit var overlay: Bitmap
+    private lateinit var cameraExecutor: ExecutorService
     private var imageCapture: ImageCapture? = null
 
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var recording: Recording? = null
-
-    private lateinit var cameraExecutor: ExecutorService
-
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
@@ -49,59 +51,93 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // Set up the listeners for take photo and video capture buttons
         viewBinding.imageCaptureButton.setOnClickListener { takePhoto() }
-        viewBinding.videoCaptureButton.setOnClickListener { captureVideo() }
-
         cameraExecutor = Executors.newSingleThreadExecutor()
+
+        initSeekBar()
+
+
+        val gestureListener = Gesture()
+        val doubleListener = DoubleGesture { onDoubleTap() }
+        val gestureDetector = GestureDetector(this, gestureListener)
+        gestureDetector.setOnDoubleTapListener(doubleListener)
+        viewBinding.root.setOnTouchListener { _, event ->
+            return@setOnTouchListener gestureDetector.onTouchEvent(event)
+        }
+    }
+
+    private fun setSeekBarEvent() {
+        seekBarProgress = seekBar.progress
+        seekBar.setOnSeekBarChangeListener(object : OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                seekBarProgress = seekBar.progress
+                seekBarValue.text = seekBarProgress.toString()
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+            }
+
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                val sharedPreferences =
+                    getSharedPreferences("defaultConfig", MODE_PRIVATE)
+                val editor = sharedPreferences.edit()
+                editor.putString("progress", seekBar.progress.toString())
+                editor.apply()
+            }
+        })
+    }
+
+    private fun initSeekBar() {
+        val sharedPreferences = getSharedPreferences(
+            "defaultConfig",
+            MODE_PRIVATE
+        )
+
+        val progressValue = sharedPreferences.getString("progress", seekBarProgress.toString())
+        seekBar.max = MAX_SEEKBAR_VALUE
+        seekBar.progress = progressValue!!.toInt()
+        seekBarProgress = seekBar.progress
+        seekBarValue.text = seekBarProgress.toString()
+        setSeekBarEvent()
+    }
+
+    private fun onDoubleTap() {
+        if (seekBarState) {
+            seekBar.visibility = INVISIBLE
+            seekBarValue.visibility = INVISIBLE
+            seekBarState = false
+        } else {
+            seekBar.visibility = VISIBLE
+            seekBarValue.visibility = VISIBLE
+            seekBarState = true
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        imageProxy?.close()
     }
 
     private fun takePhoto() {// Get a stable reference of the modifiable image capture use case
         val imageCapture = imageCapture ?: return
 
-        // Create time stamped name and MediaStore entry.
-        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
-            .format(System.currentTimeMillis())
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
-            }
-        }
-
-        // Create output options object which contains file + metadata
-        val outputOptions = ImageCapture.OutputFileOptions
-            .Builder(
-                contentResolver,
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
-            )
-            .build()
-
-        // Set up image capture listener, which is triggered after photo has
-        // been taken
         imageCapture.takePicture(
-            outputOptions,
             ContextCompat.getMainExecutor(this),
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onError(exc: ImageCaptureException) {
-                    Log.e(TAG, "Photo capture failed: ${exc.message}", exc)
+            object : OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val intent = Intent(applicationContext, ImageViewer::class.java)
+                    imageProxy = image
+                    startActivity(intent)
                 }
 
-                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    val msg = "Photo capture succeeded: ${output.savedUri}"
-                    Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
-                    Log.d(TAG, msg)
+                override fun onError(exception: ImageCaptureException) {
+                    Log.e(TAG, "Image Capture Error: ${exception.message}")
                 }
             }
         )
     }
 
-    private fun captureVideo() {
-
-    }
-
+    @SuppressLint("RestrictedApi")
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
@@ -117,13 +153,26 @@ class MainActivity : AppCompatActivity() {
                 }
 
             imageCapture = ImageCapture.Builder()
+                .setJpegQuality(QUALITY_JPEG_100)
                 .build()
 
+            previewWidth = viewFinder.width
+            previewHeight = viewFinder.height
             val imageAnalyzer = ImageAnalysis.Builder()
                 .build()
                 .also {
-                    it.setAnalyzer(cameraExecutor, LuminosityAnalyzer { luma ->
-                        Log.d(TAG, "Average luminosity: $luma")
+                    it.setAnalyzer(cameraExecutor, DrawAnalyzer {
+                        overlay = Bitmap.createBitmap(
+                            viewFinder.width,
+                            viewFinder.height,
+                            Bitmap.Config.ARGB_8888
+                        )
+                        val canvas = createBackgroundLineCanvas(overlay, Size(previewWidth, previewHeight))
+                        overlay.applyCanvas { canvas }
+
+                        runOnUiThread {
+                            back_ground.setImageBitmap(overlay)
+                        }
                     })
                 }
             // Select back camera as a default
@@ -160,6 +209,7 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "CameraXApp"
         private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
         private const val REQUEST_CODE_PERMISSIONS = 10
+        private const val QUALITY_JPEG_100 = 100
         private val REQUIRED_PERMISSIONS =
             mutableListOf(
                 Manifest.permission.CAMERA,
@@ -169,5 +219,92 @@ class MainActivity : AppCompatActivity() {
                     add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 }
             }.toTypedArray()
+
+
+        var previewWidth = 0
+        var previewHeight = 0
+        var seekBarProgress = 20
+        var seekBarState = false
+    }
+
+    class DoubleGesture(callback: () -> Unit) : GestureDetector.OnDoubleTapListener {
+        val c = callback
+        override fun onDoubleTap(e: MotionEvent?): Boolean {
+            c()
+            return true
+        }
+
+        override fun onDoubleTapEvent(e: MotionEvent?): Boolean {
+            return true
+            TODO("not implemented")
+        }
+
+        override fun onSingleTapConfirmed(e: MotionEvent?): Boolean {
+            return true
+            TODO("not implemented")
+        }
+    }
+
+    class Gesture : GestureDetector.OnGestureListener {
+        override fun onShowPress(e: MotionEvent?) {
+            TODO("not implemented")
+        }
+
+        override fun onSingleTapUp(e: MotionEvent?): Boolean {
+            return true
+            TODO("not implemented")
+        }
+
+        override fun onDown(e: MotionEvent?): Boolean {
+            return true
+            TODO("not implemented")
+        }
+
+        override fun onFling(
+            e1: MotionEvent?,
+            e2: MotionEvent?,
+            velocityX: Float,
+            velocityY: Float
+        ): Boolean {
+            return true
+            TODO("not implemented")
+        }
+
+        override fun onScroll(
+            e1: MotionEvent?,
+            e2: MotionEvent?,
+            distanceX: Float,
+            distanceY: Float
+        ): Boolean {
+            return true
+            TODO("not implemented")
+        }
+
+        override fun onLongPress(e: MotionEvent?) {
+            TODO("not implemented")
+        }
+
     }
 }
+
+
+
+// Create time stamped name and MediaStore entry.
+//        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+//            .format(System.currentTimeMillis())
+//        val contentValues = ContentValues().apply {
+//            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+//            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+//            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+//                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
+//            }
+//        }
+//
+//        // Create output options object which contains file + metadata
+//        val outputOptions = ImageCapture.OutputFileOptions
+//            .Builder(
+//                contentResolver,
+//                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+//                contentValues
+//            )
+//            .build()
